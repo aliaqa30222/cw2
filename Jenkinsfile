@@ -39,18 +39,26 @@ pipeline {
                         docker run -d -p 3000:3000 --name test-container $DOCKER_IMAGE
                     '''
                     
-                    // Sleep to allow the container to initialize
-                    sleep 5
+                    // Wait for the app to start by retrying the curl request
+                    echo 'Waiting for the app to start...'
+                    def retryCount = 0
+                    def maxRetries = 10
+                    def appStarted = false
+                    while (retryCount < maxRetries) {
+                        sleep 5
+                        echo "Attempt #${retryCount + 1} to curl the app..."
+                        def testResult = sh(script: 'curl -f http://localhost:3000', returnStatus: true)
+                        if (testResult == 0) {
+                            appStarted = true
+                            break
+                        }
+                        retryCount++
+                    }
 
-                    // Run a simple curl command to verify the app is up and running
-                    echo 'Testing app with curl...'
-                    def testResult = sh(script: 'curl -f http://localhost:3000', returnStatus: true)
-
-                    // Check if the curl command was successful
-                    if (testResult != 0) {
-                        echo 'App is not responding correctly, test failed.'
+                    if (!appStarted) {
+                        echo 'App is not responding after multiple attempts, test failed.'
                         currentBuild.result = 'FAILURE'
-                        error('Test failed: Connection to localhost:3000 failed')
+                        error('Test failed: Connection to localhost:3000 failed after retries.')
                     } else {
                         echo 'Test successful ✅'
                     }
