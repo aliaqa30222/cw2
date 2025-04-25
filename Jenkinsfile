@@ -1,43 +1,47 @@
-cd path/to/cw2
-cat > Jenkinsfile << 'EOF'
 pipeline {
-  agent any
-  environment { IMAGE = "aliaqa30222/cw2-server" }
-  stages {
-    stage('Checkout') { steps { checkout scm } }
-    stage('Build Docker Image') {
-      steps { script { docker.build("${IMAGE}:${env.BUILD_NUMBER}") } }
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'aliaqa30222/cw2-nodejs-app'
     }
-    stage('Smoke Test Container') {
-      steps {
-        sh '''
-          docker run -d --name smoke-test ${IMAGE}:${BUILD_NUMBER}
-          sleep 5
-          docker exec smoke-test curl -f http://localhost:8081/ || (docker logs smoke-test; exit 1)
-          docker rm -f smoke-test
-        '''
-      }
-    }
-    stage('Push to DockerHub') {
-      steps {
-        script {
-          docker.withRegistry('', 'dockerhub-creds') {
-            docker.image("${IMAGE}:${env.BUILD_NUMBER}").push()
-          }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git 'https://github.com/aliaqa30222/cw2.git'
+            }
         }
-      }
-    }
-    stage('Deploy to Kubernetes') {
-      steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          sh 'kubectl --kubeconfig=$KUBECONFIG set image deployment/cw2-server-deployment cw2-server=${IMAGE}:${BUILD_NUMBER} --record'
+
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t $DOCKER_IMAGE .'
+            }
         }
-      }
+
+        stage('Smoke Test Container') {
+            steps {
+                sh 'docker run -d -p 3000:3000 --name test-container $DOCKER_IMAGE'
+                sh 'sleep 5'
+                sh 'curl -f http://localhost:3000 || exit 1'
+                sh 'docker stop test-container && docker rm test-container'
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
+                    sh 'docker push $DOCKER_IMAGE'
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh 'kubectl apply -f k8s/deployment.yaml'
+                sh 'kubectl rollout status deployment/nodejs-deployment'
+            }
+        }
     }
-  }
-  post {
-    success { echo "✅ CD Pipeline succeeded!" }
-    failure { echo "❌ CD Pipeline failed; check logs." }
-  }
 }
-EOF
+
