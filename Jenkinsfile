@@ -1,66 +1,53 @@
 pipeline {
     agent any
 
+    // keep your logs tidy and limited
+    options {
+        buildDiscarder(logRotator(daysToKeepStr: '7', numToKeepStr: '10'))
+        timestamps()                          // add timestamps to every log line :contentReference[oaicite:0]{index=0}
+        ansiColor('xterm')                   // enable ANSI color in console :contentReference[oaicite:1]{index=1}
+        skipDefaultCheckout()                // we'll checkout explicitly
+    }
+
     environment {
-        DOCKER_IMAGE = 'aliaqa30222/cw2-nodejs-app'
+        REGISTRY         = 'aliaqa30222'
+        IMAGE_NAME       = 'cw2-nodejs-app'
+        IMAGE_TAG        = "${env.BUILD_NUMBER}"
+        DOCKER_IMAGE     = "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+        DOCKERHUB_CREDS  = 'dockerhub-credentials-id'   // Jenkins credential for DockerHub
+        KUBE_CONFIG      = credentials('kubeconfig-id') // Kubernetes config stored as secret file
     }
 
     stages {
-        stage('Checkout SCM') {
+        stage('Checkout') {
             steps {
-                script {
-                    echo 'Checking out code from Git repository...'
-                    checkout scm
-                }
+                echo '🔍 Checking out source…'
+                checkout scm
             }
         }
 
         stage('Build Docker Image') {
             steps {
+                echo '🐳 Building Docker image…'
                 script {
-                    echo 'Building Docker image...'
-                    sh 'docker build -t $DOCKER_IMAGE .'
+                    // use the Docker Pipeline plugin for a “real” build
+                    docker.build(env.DOCKER_IMAGE, '.')
                 }
             }
         }
 
-        stage('Smoke Test Container') {
+        stage('Smoke Test') {
             steps {
+                echo '⚡ Running smoke test…'
                 script {
-                    echo 'Running container for smoke test...'
-                    
-                    // Remove any existing container with the name 'test-container'
-                    sh '''
-                        docker ps -a -q -f name=test-container | xargs -I {} docker rm -f {}
-                    '''
-                    
-                    // Run the new container
-                    sh '''
-                        docker run -d -p 3000:3000 --name test-container $DOCKER_IMAGE
-                    '''
-                    
-                    // Wait for the app to start by retrying the curl request
-                    echo 'Waiting for the app to start...'
-                    def retryCount = 0
-                    def maxRetries = 10
-                    def appStarted = false
-                    while (retryCount < maxRetries) {
-                        sleep 5
-                        echo "Attempt #${retryCount + 1} to curl the app..."
-                        def testResult = sh(script: 'curl -f http://localhost:3000', returnStatus: true)
-                        if (testResult == 0) {
-                            appStarted = true
-                            break
+                    // run container inline
+                    docker.image(env.DOCKER_IMAGE).inside("-p 3000:3000 --name smoke-test") {
+                        // give the app up to 30 s to start
+                        timeout(time: 1, unit: 'MINUTES') {
+                            retry(5) {
+                                sh label: "Curl localhost:3000", script: 'curl -f http://localhost:3000'
+                            }
                         }
-                        retryCount++
-                    }
-
-                    if (!appStarted) {
-                        echo 'App is not responding after multiple attempts, test failed.'
-                        currentBuild.result = 'FAILURE'
-                        error('Test failed: Connection to localhost:3000 failed after retries.')
-                    } else {
-                        echo 'Test successful ✅'
                     }
                 }
             }
@@ -68,18 +55,19 @@ pipeline {
 
         stage('Push to DockerHub') {
             steps {
+                echo '📤 Pushing image to DockerHub…'
                 script {
-                    echo 'Pushing Docker image to DockerHub...'
-                    sh 'docker push $DOCKER_IMAGE'
+                    docker.withRegistry('', env.DOCKERHUB_CREDS) {
+                        docker.image(env.DOCKER_IMAGE).push()
+                    }
                 }
             }
         }
 
         stage('Deploy to Kubernetes') {
             steps {
-                script {
-                    echo 'Deploying application to Kubernetes...'
-                    // Deploy to Kubernetes (This is just a placeholder; you will need to add your specific deploy commands)
+                echo '🚀 Deploying to Kubernetes…'
+                withEnv(["KUBECONFIG=${env.KUBE_CONFIG}"]) {
                     sh 'kubectl apply -f deployment.yaml'
                 }
             }
@@ -88,17 +76,14 @@ pipeline {
 
     post {
         always {
-            echo 'Cleaning up...'
-            // Clean up the container after testing
-            sh 'docker rm -f test-container || true'
+            echo '🧹 Cleaning up any leftover containers…'
+            sh 'docker rm -f smoke-test || true'
         }
-
         success {
-            echo 'Pipeline completed successfully ✅'
+            echo '✅ Pipeline completed successfully!'
         }
-
         failure {
-            echo 'Pipeline failed ❌'
+            echo '❌ Pipeline failed—please check the logs.'
         }
     }
 }
